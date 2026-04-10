@@ -4,14 +4,15 @@
   "description": "AI agent for elderly care financial coordination on Stellar",
   "main": "index.js",
   "scripts": {
-    "setup": "tsx scripts/setup-wallets.ts",
-    "pharmacy-api": "tsx services/pharmacy-api/server.ts",
-    "bill-audit-api": "tsx services/bill-audit-api/server.ts",
-    "drug-api": "tsx services/drug-interaction-api/server.ts",
-    "agent": "tsx agent/server.ts",
-    "pharmacy-payment": "tsx services/pharmacy-payment/server.ts",
-    "services": "concurrently \"npm run pharmacy-api\" \"npm run bill-audit-api\" \"npm run drug-api\" \"npm run pharmacy-payment\"",
-    "dev": "concurrently \"npm run services\" \"npm run agent\""
+    "setup": "node --import tsx scripts/setup-wallets.ts",
+    "pharmacy-api": "node --import tsx services/pharmacy-api/server.ts",
+    "bill-audit-api": "node --import tsx services/bill-audit-api/server.ts",
+    "drug-api": "node --import tsx services/drug-interaction-api/server.ts",
+    "agent": "node --import tsx agent/server.ts",
+    "pharmacy-payment": "node --import tsx services/pharmacy-payment/server.ts",
+    "services": "concurrently --kill-others-on-fail \"npm run pharmacy-api\" \"npm run bill-audit-api\" \"npm run drug-api\" \"npm run pharmacy-payment\"",
+    "start": "node --experimental-strip-types --experimental-transform-types --no-warnings server.ts",
+    "dev": "node --experimental-strip-types --experimental-transform-types --no-warnings server.ts"
   },
   "keywords": [],
   "author": "",

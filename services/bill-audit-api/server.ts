@@ -5,27 +5,19 @@
  * POST /bill/audit — $0.01 per audit
  *
  * Fair market rate database based on Medicare reimbursement rates (CMS 2026 fee schedule).
- * Detects: duplicate charges, upcoding, unbundling, overcharges vs fair market rates.
  */
 
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { paymentMiddlewareFromConfig } from "@x402/express";
-import { HTTPFacilitatorClient } from "@x402/core/server";
-import { ExactStellarScheme } from "@x402/stellar/exact/server";
+import { applyX402Middleware, NETWORK, OZ_FACILITATOR_URL } from "../../shared/x402-middleware.ts";
 
 const PORT = parseInt(process.env.BILL_AUDIT_API_PORT || "3002");
 const PAY_TO = process.env.BILL_PROVIDER_PUBLIC_KEY;
-const OZ_API_KEY = process.env.OZ_FACILITATOR_API_KEY;
-const OZ_FACILITATOR_URL = "https://channels.openzeppelin.com/x402/testnet";
-const NETWORK = "stellar:testnet";
 
 if (!PAY_TO) throw new Error("BILL_PROVIDER_PUBLIC_KEY required in .env");
-if (!OZ_API_KEY) throw new Error("OZ_FACILITATOR_API_KEY required in .env");
 
 // Fair market rate database — based on CMS Medicare Physician Fee Schedule 2026
-// These are approximate national average rates with a 1.2x commercial multiplier
 const FAIR_MARKET_RATES: Record<string, { description: string; fairRate: number }> = {
   "99213": { description: "Office visit, established patient, moderate", fairRate: 130 },
   "99214": { description: "Office visit, established patient, high", fairRate: 195 },
@@ -59,7 +51,7 @@ function auditBill(lineItems: BillItem[]) {
     seenCodes[item.cptCode] = (seenCodes[item.cptCode] || 0) + 1;
     if (seenCodes[item.cptCode] > 1 && !["96372", "97110"].includes(item.cptCode)) {
       errorCount++;
-      results.push({ description: item.description, cptCode: item.cptCode, quantity: item.quantity, chargedAmount: item.chargedAmount, fairMarketRate: fairAmount, status: "duplicate", errorDescription: `Duplicate charge for CPT ${item.cptCode}. Appears ${seenCodes[item.cptCode]} times — likely billed in error.`, suggestedAmount: 0 });
+      results.push({ description: item.description, cptCode: item.cptCode, quantity: item.quantity, chargedAmount: item.chargedAmount, fairMarketRate: fairAmount, status: "duplicate", errorDescription: `Duplicate charge for CPT ${item.cptCode}. Appears ${seenCodes[item.cptCode]} times.`, suggestedAmount: 0 });
       continue;
     }
 
@@ -84,7 +76,7 @@ function auditBill(lineItems: BillItem[]) {
     protocol: { name: "x402", network: NETWORK, price: "$0.01", payTo: PAY_TO },
     totalCharged: +totalCharged.toFixed(2), totalCorrect: +totalCorrect.toFixed(2),
     totalOvercharge, savingsPercent, errorCount, lineItems: results,
-    recommendation: errorCount === 0 ? "No errors detected. This bill appears correct." : `Found ${errorCount} errors totaling $${totalOvercharge} in overcharges (${savingsPercent}% of total bill). Strongly recommend filing a formal dispute with the provider's billing department.`,
+    recommendation: errorCount === 0 ? "No errors detected. This bill appears correct." : `Found ${errorCount} errors totaling $${totalOvercharge} in overcharges (${savingsPercent}% of total bill). Strongly recommend filing a formal dispute.`,
   };
 }
 
@@ -99,7 +91,6 @@ app.get("/", (_req, res) => {
   });
 });
 
-// Sample bill for testing (Rosa Garcia's hospital visit)
 app.get("/bill/sample", (_req, res) => {
   res.json({
     patientName: "Rosa Garcia", facilityName: "General Hospital", dateOfService: "2026-03-15",
@@ -118,22 +109,13 @@ app.get("/bill/sample", (_req, res) => {
   });
 });
 
-// x402 payment middleware — real OZ facilitator
-const facilitator = new HTTPFacilitatorClient({
-  url: OZ_FACILITATOR_URL,
-  createAuthHeaders: async () => {
-    const h = { Authorization: `Bearer ${OZ_API_KEY}` };
-    return { verify: h, settle: h, supported: h };
+// x402 payment middleware
+applyX402Middleware(app, {
+  "POST /bill/audit": {
+    accepts: { scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "$0.01" },
+    description: "Medical bill audit — $0.01 USDC",
   },
 });
-
-app.use(
-  paymentMiddlewareFromConfig(
-    { "POST /bill/audit": { accepts: { scheme: "exact", network: NETWORK as `${string}:${string}`, payTo: PAY_TO, price: "$0.01" }, description: "Medical bill audit — $0.01 USDC" } },
-    facilitator,
-    [{ network: NETWORK as `${string}:${string}`, server: new ExactStellarScheme() }]
-  )
-);
 
 app.post("/bill/audit", (req, res) => {
   const { lineItems } = req.body;

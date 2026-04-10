@@ -1,0 +1,206 @@
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+
+const HEADER_COLOR: [number, number, number] = [14, 165, 233]; // sky-500
+
+function addHeader(doc: jsPDF, title: string, subtitle: string) {
+  doc.setFontSize(20);
+  doc.setTextColor(15, 23, 42); // slate-900
+  doc.text("CareGuard", 14, 20);
+  doc.setFontSize(10);
+  doc.setTextColor(100, 116, 139); // slate-500
+  doc.text("AI Healthcare Agent on Stellar", 14, 26);
+
+  doc.setFontSize(14);
+  doc.setTextColor(15, 23, 42);
+  doc.text(title, 14, 38);
+  doc.setFontSize(9);
+  doc.setTextColor(100, 116, 139);
+  doc.text(subtitle, 14, 44);
+  doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 49);
+
+  doc.setDrawColor(226, 232, 240); // slate-200
+  doc.line(14, 52, 196, 52);
+}
+
+function addFooter(doc: jsPDF) {
+  const pageCount = doc.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(8);
+    doc.setTextColor(148, 163, 184); // slate-400
+    doc.text("CareGuard | Stellar Testnet | All transactions verifiable on stellar.expert", 14, 287);
+    doc.text(`Page ${i} of ${pageCount}`, 186, 287, { align: "right" });
+  }
+}
+
+export function downloadBillAuditPDF(auditResult: any) {
+  const doc = new jsPDF();
+  addHeader(doc, "Medical Bill Audit Report", "Patient: Rosa Garcia | Facility: General Hospital");
+
+  // Summary boxes
+  let y = 58;
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  doc.text(`Total Charged: $${auditResult.totalCharged}`, 14, y);
+  doc.setTextColor(239, 68, 68); // red-500
+  doc.text(`Overcharges Found: $${auditResult.totalOvercharge}`, 80, y);
+  doc.setTextColor(34, 197, 94); // green-500
+  doc.text(`Corrected Amount: $${auditResult.totalCorrect}`, 146, y);
+  y += 4;
+  doc.setTextColor(100, 116, 139);
+  doc.setFontSize(9);
+  doc.text(`${auditResult.errorCount} errors found (${auditResult.savingsPercent}% of total bill)`, 14, y + 4);
+
+  // Line items table
+  autoTable(doc, {
+    startY: y + 10,
+    head: [["Description", "CPT Code", "Qty", "Charged", "Status", "Suggested"]],
+    body: auditResult.lineItems.map((item: any) => [
+      item.description,
+      item.cptCode,
+      item.quantity,
+      `$${item.chargedAmount}`,
+      item.status === "valid" ? "OK" : item.status.toUpperCase(),
+      item.status !== "valid" ? `$${item.suggestedAmount}` : "-",
+    ]),
+    headStyles: { fillColor: HEADER_COLOR, fontSize: 8 },
+    bodyStyles: { fontSize: 8 },
+    alternateRowStyles: { fillColor: [248, 250, 252] },
+    didParseCell: (data: any) => {
+      if (data.section === "body" && data.column.index === 4) {
+        const val = data.cell.raw as string;
+        if (val === "DUPLICATE") data.cell.styles.textColor = [239, 68, 68];
+        else if (val === "UPCODED" || val === "OVERCHARGED") data.cell.styles.textColor = [245, 158, 11];
+      }
+    },
+  });
+
+  // Recommendation
+  const finalY = (doc as any).lastAutoTable?.finalY || 200;
+  doc.setFontSize(9);
+  doc.setTextColor(15, 23, 42);
+  doc.text(auditResult.recommendation || "", 14, finalY + 8, { maxWidth: 180 });
+
+  addFooter(doc);
+  doc.save("careguard-bill-audit-report.pdf");
+}
+
+export function downloadMedicationPDF(toolCalls: Array<{ tool: string; result: any }>) {
+  const doc = new jsPDF();
+  addHeader(doc, "Medication Price Comparison Report", "Patient: Rosa Garcia | 4 Medications Compared");
+
+  let y = 58;
+  const priceResults = toolCalls.filter(t => t.tool === "compare_pharmacy_prices" && t.result?.cheapest);
+  const interactionResult = toolCalls.find(t => t.tool === "check_drug_interactions")?.result;
+
+  // Total savings summary
+  const totalSavings = priceResults.reduce((sum, t) => sum + (t.result.potentialSavings || 0), 0);
+  doc.setFontSize(11);
+  doc.setTextColor(34, 197, 94);
+  doc.text(`Total Potential Savings: $${totalSavings.toFixed(2)}/month ($${(totalSavings * 12).toFixed(2)}/year)`, 14, y);
+  y += 8;
+
+  // Price comparison for each drug
+  for (const tc of priceResults) {
+    const r = tc.result;
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${r.drug}`, 14, y);
+    doc.setFontSize(8);
+    doc.setTextColor(34, 197, 94);
+    doc.text(`Save $${r.potentialSavings}/mo (${r.savingsPercent}%)`, 60, y);
+    y += 2;
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Pharmacy", "Price", "Distance", "In Stock"]],
+      body: r.prices.map((p: any) => [p.pharmacyName, `$${p.price}`, p.distance, p.inStock ? "Yes" : "No"]),
+      headStyles: { fillColor: HEADER_COLOR, fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      margin: { left: 14, right: 14 },
+      didParseCell: (data: any) => {
+        if (data.section === "body" && data.row.index === 0) {
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.textColor = [34, 197, 94];
+        }
+      },
+    });
+
+    y = (doc as any).lastAutoTable?.finalY + 6 || y + 30;
+    if (y > 260) { doc.addPage(); y = 20; }
+  }
+
+  // Drug interactions
+  if (interactionResult?.interactions?.length > 0) {
+    if (y > 240) { doc.addPage(); y = 20; }
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text("Drug Interactions", 14, y);
+    y += 4;
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Drug 1", "Drug 2", "Severity", "Recommendation"]],
+      body: interactionResult.interactions.map((ix: any) => [ix.drug1, ix.drug2, ix.severity, ix.recommendation]),
+      headStyles: { fillColor: [245, 158, 11], fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+      columnStyles: { 3: { cellWidth: 70 } },
+    });
+  }
+
+  addFooter(doc);
+  doc.save("careguard-medication-report.pdf");
+}
+
+export function downloadTransactionPDF(transactions: any[], spending: any) {
+  const doc = new jsPDF();
+  addHeader(doc, "Transaction Report", `Patient: Rosa Garcia | ${transactions.length} Transactions`);
+
+  let y = 58;
+
+  // Spending summary
+  if (spending) {
+    doc.setFontSize(10);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`Medications: $${spending.spending.medications.toFixed(2)}`, 14, y);
+    doc.text(`Bills: $${spending.spending.bills.toFixed(2)}`, 70, y);
+    doc.text(`API Fees (x402): $${spending.spending.serviceFees.toFixed(4)}`, 120, y);
+    y += 5;
+    doc.setFontSize(11);
+    doc.text(`Total: $${spending.spending.total.toFixed(2)}`, 14, y);
+    y += 8;
+  }
+
+  // Transactions table
+  autoTable(doc, {
+    startY: y,
+    head: [["Time", "Type", "Description", "Amount", "Status", "Stellar Tx"]],
+    body: transactions.map((tx: any) => {
+      let txHash = tx.stellarTxHash || "-";
+      if (txHash.length > 64) {
+        try {
+          const decoded = JSON.parse(atob(txHash));
+          txHash = (decoded.transaction || decoded.reference || txHash).slice(0, 16) + "...";
+        } catch { txHash = txHash.slice(0, 16) + "..."; }
+      } else if (txHash.length === 64) {
+        txHash = txHash.slice(0, 16) + "...";
+      }
+      return [
+        new Date(tx.timestamp).toLocaleString(),
+        tx.type,
+        tx.description.slice(0, 40),
+        `$${tx.amount < 0.01 ? tx.amount.toFixed(4) : tx.amount.toFixed(2)}`,
+        tx.status,
+        txHash,
+      ];
+    }),
+    headStyles: { fillColor: HEADER_COLOR, fontSize: 7 },
+    bodyStyles: { fontSize: 7 },
+    columnStyles: { 2: { cellWidth: 45 }, 5: { cellWidth: 25, fontStyle: "italic" } },
+  });
+
+  addFooter(doc);
+  doc.save("careguard-transaction-report.pdf");
+}

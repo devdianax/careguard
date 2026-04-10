@@ -16,6 +16,8 @@ import { Keypair, Horizon } from "@stellar/stellar-sdk";
 import {
   comparePharmacyPrices,
   auditBill,
+  fetchRosaBill,
+  fetchAndAuditBill,
   checkDrugInteractions,
   payForMedication,
   payBill,
@@ -25,7 +27,7 @@ import {
   getSpendingTracker,
   resetSpendingTracker,
   TOOL_DEFINITIONS,
-} from "./tools.js";
+} from "./tools.ts";
 
 const PORT = parseInt(process.env.AGENT_PORT || "3004");
 
@@ -56,6 +58,7 @@ IMPORTANT RULES:
 - If a payment requires caregiver approval, flag it and wait — do not proceed
 - If a payment is blocked by policy, explain why clearly
 - When comparing medication prices, compare ALL medications at once, then check interactions, then order from cheapest
+- When auditing a bill, use fetch_and_audit_bill which fetches Rosa's bill and audits it in one step. Never invent bill data.
 - Report the total savings found and the cost of the agent's API queries
 
 PAYMENT PROTOCOLS:
@@ -89,10 +92,12 @@ async function executeTool(name: string, input: any): Promise<any> {
       const items = typeof input.line_items_json === "string" ? JSON.parse(input.line_items_json) : (input.line_items || input.line_items_json);
       return await auditBill(items);
     }
+    case "fetch_rosa_bill": return await fetchRosaBill();
+    case "fetch_and_audit_bill": return await fetchAndAuditBill();
     case "check_drug_interactions": return await checkDrugInteractions(input.medications);
-    case "pay_for_medication": return await payForMedication(input.pharmacy_id, input.pharmacy_name, input.drug_name, input.amount);
-    case "pay_bill": return await payBill(input.provider_id, input.provider_name, input.description, input.amount);
-    case "check_spending_policy": return checkSpendingPolicy(input.amount, input.category);
+    case "pay_for_medication": return await payForMedication(input.pharmacy_id, input.pharmacy_name, input.drug_name, parseFloat(input.amount));
+    case "pay_bill": return await payBill(input.provider_id, input.provider_name, input.description, parseFloat(input.amount));
+    case "check_spending_policy": return checkSpendingPolicy(parseFloat(input.amount), input.category);
     case "get_spending_summary": return getSpendingSummary();
     default: return { error: `Unknown tool: ${name}` };
   }
@@ -189,6 +194,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+let agentPaused = false;
+
 app.get("/", (_req, res) => {
   res.json({
     service: "CareGuard AI Agent",
@@ -198,12 +205,18 @@ app.get("/", (_req, res) => {
     agentWallet: agentKeypair.publicKey(),
     careRecipient: "Rosa Garcia",
     caregiver: "Maria Garcia",
+    paused: agentPaused,
   });
 });
+
+app.get("/agent/status", (_req, res) => { res.json({ paused: agentPaused }); });
+app.post("/agent/pause", (_req, res) => { agentPaused = true; console.log("  ⏸ Agent paused by caregiver"); res.json({ paused: true }); });
+app.post("/agent/resume", (_req, res) => { agentPaused = false; console.log("  ▶ Agent resumed by caregiver"); res.json({ paused: false }); });
 
 app.post("/agent/run", async (req, res) => {
   const { task } = req.body;
   if (!task) { res.status(400).json({ error: "Missing 'task' in request body" }); return; }
+  if (agentPaused) { res.status(409).json({ error: "Agent is paused. Resume from the dashboard to continue.", paused: true }); return; }
 
   console.log(`\n🤖 Agent task: "${task.slice(0, 100)}..."`);
 

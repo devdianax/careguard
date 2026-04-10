@@ -14,7 +14,7 @@ import { wrapFetchWithPayment, x402Client, decodePaymentResponseHeader } from "@
 import { createEd25519Signer, ExactStellarScheme } from "@x402/stellar";
 import { Mppx } from "mppx/client";
 import { stellar as stellarCharge } from "@stellar/mpp/charge/client";
-import type { SpendingPolicy, Transaction } from "../shared/types.js";
+import type { SpendingPolicy, Transaction } from "../shared/types.ts";
 
 // Environment
 const AGENT_SECRET_KEY = process.env.AGENT_SECRET_KEY;
@@ -92,7 +92,9 @@ function saveSpending(data: SpendingTracker) {
 
 let spendingTracker = loadSpending();
 
-let currentPolicy: SpendingPolicy = {
+const POLICY_FILE = `${DATA_DIR}/policy.json`;
+
+const DEFAULT_POLICY: SpendingPolicy = {
   dailyLimit: 100,
   monthlyLimit: 500,
   medicationMonthlyBudget: 300,
@@ -100,7 +102,22 @@ let currentPolicy: SpendingPolicy = {
   approvalThreshold: 75,
 };
 
-export function setSpendingPolicy(policy: SpendingPolicy) { currentPolicy = policy; }
+function loadPolicy(): SpendingPolicy {
+  if (!existsSync(POLICY_FILE)) return { ...DEFAULT_POLICY };
+  try { return JSON.parse(readFileSync(POLICY_FILE, "utf-8")); }
+  catch { return { ...DEFAULT_POLICY }; }
+}
+
+function savePolicy(policy: SpendingPolicy) {
+  writeFileSync(POLICY_FILE, JSON.stringify(policy, null, 2));
+}
+
+let currentPolicy: SpendingPolicy = loadPolicy();
+
+export function setSpendingPolicy(policy: SpendingPolicy) {
+  currentPolicy = policy;
+  savePolicy(policy);
+}
 export function getSpendingTracker() { return { ...spendingTracker, policy: currentPolicy }; }
 export function resetSpendingTracker() {
   spendingTracker = { medications: 0, bills: 0, serviceFees: 0, transactions: [] };
@@ -141,15 +158,48 @@ export async function comparePharmacyPrices(drugName: string, zipCode: string = 
   return data;
 }
 
+// --- Tool: Fetch Rosa's hospital bill (free endpoint, no x402 payment) ---
+export async function fetchRosaBill() {
+  console.log(`  [fetch] Getting Rosa's hospital bill from ${BILL_AUDIT_API}/bill/sample`);
+
+  const response = await fetch(`${BILL_AUDIT_API}/bill/sample`);
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch bill (${response.status}): service may be starting up. Try again in a moment.`);
+  }
+
+  return await response.json();
+}
+
+// --- Tool: Fetch Rosa's bill AND audit it in one step (pays via x402) ---
+export async function fetchAndAuditBill() {
+  console.log(`  [fetch+audit] Getting Rosa's bill and auditing it`);
+
+  // Step 1: Fetch the bill (free)
+  const billResponse = await fetch(`${BILL_AUDIT_API}/bill/sample`);
+  if (!billResponse.ok) {
+    throw new Error(`Failed to fetch bill (${billResponse.status}): service may be starting up.`);
+  }
+  const bill = await billResponse.json();
+
+  // Step 2: Audit it (pays via x402)
+  return await auditBill(bill.lineItems);
+}
+
 // --- Tool: Audit a medical bill (pays via x402) ---
 export async function auditBill(lineItems: Array<{ description: string; cptCode: string; quantity: number; chargedAmount: number }>) {
   console.log(`  [x402] Paying for bill audit (${lineItems.length} line items)`);
 
-  const response = await x402Fetch(`${BILL_AUDIT_API}/bill/audit`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ lineItems }),
-  });
+  let response: Response;
+  try {
+    response = await x402Fetch(`${BILL_AUDIT_API}/bill/audit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lineItems }),
+    });
+  } catch (err: any) {
+    throw new Error(`Bill Audit API unreachable: ${err.message}. Ensure the service is running on ${BILL_AUDIT_API}`);
+  }
 
   if (!response.ok) {
     const error = await response.text();
@@ -241,6 +291,9 @@ export function checkSpendingPolicy(amount: number, category: "medications" | "b
 
 // --- Tool: Pay for medication via MPP Charge (real Stellar payment) ---
 export async function payForMedication(pharmacyId: string, pharmacyName: string, drugName: string, amount: number) {
+  if (!amount || amount <= 0 || isNaN(amount)) {
+    return { success: false, error: `Invalid payment amount: $${amount}. Amount must be a positive number.` };
+  }
   const policyCheck = checkSpendingPolicy(amount, "medications");
   if (!policyCheck.allowed) return { success: false, error: `BLOCKED BY SPENDING POLICY: ${policyCheck.reason}` };
   if (policyCheck.requiresApproval) {
@@ -305,6 +358,9 @@ export async function payForMedication(pharmacyId: string, pharmacyName: string,
 
 // --- Tool: Pay a medical bill via real Stellar USDC transfer ---
 export async function payBill(providerId: string, providerName: string, description: string, amount: number) {
+  if (!amount || amount <= 0 || isNaN(amount)) {
+    return { success: false, error: `Invalid payment amount: $${amount}. Amount must be a positive number.` };
+  }
   const policyCheck = checkSpendingPolicy(amount, "bills");
   if (!policyCheck.allowed) return { success: false, error: `BLOCKED BY SPENDING POLICY: ${policyCheck.reason}` };
   if (policyCheck.requiresApproval) {
@@ -458,6 +514,28 @@ export const TOOL_DEFINITIONS = [
         amount: { type: "number" }, category: { type: "string", enum: ["medications", "bills"] },
       },
       required: ["amount", "category"],
+    },
+  },
+  {
+    name: "fetch_rosa_bill",
+    description: "Fetch Rosa Garcia's hospital bill from General Hospital. Returns the bill with line items including CPT codes and charged amounts.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        _unused: { type: "string", description: "Not used. Pass empty string." },
+      },
+      required: [] as string[],
+    },
+  },
+  {
+    name: "fetch_and_audit_bill",
+    description: "Fetch Rosa's hospital bill from General Hospital AND audit it for errors in one step. Pays $0.01 USDC via x402. Returns the audit results with errors found, overcharges, and corrected total. Use this instead of calling fetch_rosa_bill + audit_medical_bill separately.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        _unused: { type: "string", description: "Not used. Pass empty string." },
+      },
+      required: [] as string[],
     },
   },
   {

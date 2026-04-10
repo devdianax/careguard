@@ -10,21 +10,14 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { paymentMiddlewareFromConfig } from "@x402/express";
-import { HTTPFacilitatorClient } from "@x402/core/server";
-import { ExactStellarScheme } from "@x402/stellar/exact/server";
+import { applyX402Middleware, NETWORK, OZ_FACILITATOR_URL } from "../../shared/x402-middleware.ts";
 
 const PORT = parseInt(process.env.PHARMACY_API_PORT || "3001");
 const PAY_TO = process.env.PHARMACY_1_PUBLIC_KEY;
-const OZ_API_KEY = process.env.OZ_FACILITATOR_API_KEY;
-const OZ_FACILITATOR_URL = "https://channels.openzeppelin.com/x402/testnet";
-const NETWORK = "stellar:testnet";
 
 if (!PAY_TO) throw new Error("PHARMACY_1_PUBLIC_KEY required in .env");
-if (!OZ_API_KEY) throw new Error("OZ_FACILITATOR_API_KEY required in .env");
 
 // Reference pricing database — based on real-world pharmacy pricing patterns
-// Source: GoodRx average cash prices, CostcoRx member pricing (Q1 2026)
 const PRICING_DATABASE: Record<string, Array<{ pharmacy: string; id: string; price: number; distance: string }>> = {
   lisinopril: [
     { pharmacy: "Costco Pharmacy", id: "costco-001", price: 3.50, distance: "2.1 mi" },
@@ -67,7 +60,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Service info (unprotected)
+// Unprotected endpoints
 app.get("/", (_req, res) => {
   res.json({
     service: "CareGuard Pharmacy Price Comparison API",
@@ -85,36 +78,15 @@ app.get("/pharmacy/drugs", (_req, res) => {
   res.json({ drugs: Object.keys(PRICING_DATABASE), count: Object.keys(PRICING_DATABASE).length });
 });
 
-// x402 payment middleware — real OZ facilitator on Stellar testnet
-const facilitator = new HTTPFacilitatorClient({
-  url: OZ_FACILITATOR_URL,
-  createAuthHeaders: async () => {
-    const headers = { Authorization: `Bearer ${OZ_API_KEY}` };
-    return { verify: headers, settle: headers, supported: headers };
+// x402 payment middleware
+applyX402Middleware(app, {
+  "GET /pharmacy/compare": {
+    accepts: { scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "$0.002" },
+    description: "Pharmacy price comparison query — $0.002 USDC",
   },
 });
 
-const routes = {
-  "GET /pharmacy/compare": {
-    accepts: {
-      scheme: "exact",
-      network: NETWORK as `${string}:${string}`,
-      payTo: PAY_TO,
-      price: "$0.002",
-    },
-    description: "Pharmacy price comparison query — $0.002 USDC",
-  },
-};
-
-app.use(
-  paymentMiddlewareFromConfig(
-    routes,
-    facilitator,
-    [{ network: NETWORK as `${string}:${string}`, server: new ExactStellarScheme() }]
-  )
-);
-
-// x402-protected endpoint — payment required to access
+// x402-protected endpoint
 app.get("/pharmacy/compare", (req, res) => {
   const drug = (req.query.drug as string || "").toLowerCase().trim();
   const zip = req.query.zip as string || "90210";
